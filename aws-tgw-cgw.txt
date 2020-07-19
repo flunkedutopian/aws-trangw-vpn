@@ -1,0 +1,103 @@
+#reference: https://awstrainingcenter-test.s3-us-west-2.amazonaws.com/10+-+Setup+Site+to+Site+VPN+Connection+in+AWS.pdf
+
+#CIDR Variables
+mvpccidr="10.0.0.0/16"
+opvpccidr="10.1.0.0/16"
+
+
+msubcidr="10.0.0.0/24"
+opsubcidr="10.1.0.0/24"
+
+
+#Create VPC, Subnet, Routetable, associate Route table with subnet - masterVpc
+mastervpc=$(aws ec2 create-vpc --cidr-block $mvpccidr | jq '.Vpc.VpcId' | tr -d '"')
+aws ec2 create-tags --resources $mastervpc --tags Key=Name,Value=mastervpc
+msub=$(aws ec2 create-subnet --vpc-id $mastervpc --cidr-block $msubcidr --availability-zone us-west-2a | jq '.Subnet.SubnetId' | tr -d '"')
+aws ec2 create-tags --resources $msub --tags Key=Name,Value=msub
+msubrtb=$(aws ec2 create-route-table --vpc-id $mastervpc | jq '.RouteTable.RouteTableId' | tr -d '"')
+aws ec2 create-tags --resources $msubrtb --tags Key=Name,Value=msubrtb
+aws ec2 associate-route-table --route-table-id $msubrtb --subnet-id $msub
+
+#Create VPC, Subnet, Routetable, associate Route table with subnet - op
+onpremvpc=$(aws ec2 create-vpc --cidr-block $opvpccidr | jq '.Vpc.VpcId' | tr -d '"')
+aws ec2 create-tags --resources $onpremvpc --tags Key=Name,Value=onpremvpc
+opsub=$(aws ec2 create-subnet --vpc-id $onpremvpc --cidr-block $opsubcidr --availability-zone us-west-2a | jq '.Subnet.SubnetId' | tr -d '"')
+aws ec2 create-tags --resources $opsub --tags Key=Name,Value=opsub
+opsubrtb=$(aws ec2 create-route-table --vpc-id $onpremvpc | jq '.RouteTable.RouteTableId' | tr -d '"')
+aws ec2 create-tags --resources $opsubrtb --tags Key=Name,Value=opsubrtb
+aws ec2 associate-route-table --route-table-id $opsubrtb --subnet-id $opsub
+
+#attach internet gateway - onprem
+tigwid=$(aws ec2 create-internet-gateway | jq '.InternetGateway.InternetGatewayId' | tr -d '"')
+aws ec2 attach-internet-gateway --vpc-id $onpremvpc --internet-gateway-id $tigwid
+#insert route for internet - onprem
+aws ec2 create-route --route-table-id $opsubrtb --destination-cidr-block 0.0.0.0/0 --gateway-id $tigwid
+#Create secgroup for ssh and lauch instance - onprem
+sshopsgid=$(aws ec2 create-security-group --group-name SSHAccess --description "Security group for SSH access" --vpc-id $onpremvpc | jq '.GroupId' | tr -d '"')
+aws ec2 authorize-security-group-ingress --group-id $sshopsgid --protocol tcp --port 22 --cidr 0.0.0.0/0
+opserverid=$(aws ec2 run-instances --image-id ami-0b1e2eeb33ce3d66f --count 1 --instance-type t2.micro --key-name demokp --security-group-ids $sshopsgid --subnet-id $opsub --associate-public-ip-address --query 'Instances[0].InstanceId' --output text)
+aws ec2 create-tags --resources $opserverid --tags Key=Name,Value=opserverid
+aws ec2 modify-instance-attribute --instance-id $opserverid --no-source-dest-check
+aws ec2 describe-instances --filters "Name=tag:Name,Values=opserverid" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
+
+#on master vpc:
+cgwid=$(aws ec2 create-customer-gateway --bgp-asn 65000 --type ipsec.1 --public-ip 34.210.204.59 --query 'CustomerGateway.CustomerGatewayId' --output text)
+aws ec2 create-tags --resources $cgwid --tags Key=Name,Value=cgw
+#create tgw
+hubtgwid=$(aws ec2 create-transit-gateway --description hubtgw \
+    --options=AmazonSideAsn=64516,AutoAcceptSharedAttachments=enable,DefaultRouteTableAssociation=enable,DefaultRouteTablePropagation=enable,VpnEcmpSupport=enable,DnsSupport=enable \
+	| jq '.TransitGateway.TransitGatewayId' | tr -d '"')
+aws ec2 create-tags --resources $hubtgwid --tags Key=Name,Value=trangw
+#create vpn connection using transit gateway
+aws ec2 create-vpn-connection --type ipsec.1 --customer-gateway-id $cgwid --transit-gateway-id $hubtgwid --options "{\"StaticRoutesOnly\":true}"
+#after roughly 5-10 min, the status of the transit gateway attachment changes to available, go to s2s vpn connections & download the config
+
+#login to the openswan server
+10.1.0.0/16 -- AWS ENV
+10.2.0.0/16 -- On Prem
+
+VPN Connection, choose static and then mention VPC cidr of on prem vpc (10.2.0.0/16)
+aws ec2 create-vpn-connection --type ipsec.1 --customer-gateway-id $cgwid --transit-gateway-id $hubtgwid --options "{\"StaticRoutesOnly\":true}"
+
+sudo yum install openswan #Install openswan
+sudo cat /etc/ipsec.conf #check last line status should be uncommented (include /etc/ipsec.d/*.conf)
+sudo nano /etc/ipsec.d/connection.conf
+conn VpnConn1
+ authby=secret
+ auto=start
+ left=%defaultroute
+ leftid=34.210.204.59 #leftid=cgwip (#3 TunnelInterfaceConfig: Outside IP Addresses: Customer Gateway)
+ right=52.24.167.203 #right=vpgwip (#3 TunnelInterfaceConfig: Outside IP Addresses: Virtual Private Gateway)
+ type=tunnel
+ ikelifetime=8h
+ keylife=1h
+ phase2alg=aes128-sha1;modp1024
+ ike=aes128-sha1;modp1024
+ keyingtries=%forever
+ keyexchange=ike
+ leftsubnet=10.2.0.0/24
+ rightsubnet=10.1.0.0/24
+ dpddelay=10
+ dpdtimeout=30
+ dpdaction=restart_by_peer
+
+sudo nano /etc/ipsec.d/connections.secrets
+34.210.204.59 52.24.167.203: PSK "WqRUs0nJOjcoNp0bgalWAvUYMPOsSqxT"
+#cgw-ip vgw-ip: PSK "PRE_SHARED_KEY"
+
+sudo nano /etc/sysctl.conf
+net.ipv4.ip_forward = 1
+net.ipv4.conf.default.rp_filter = 0
+net.ipv4.conf.default.accept_source_route = 0
+
+systemctl restart network #service network restart then #sudo chkconfig ipsec on
+systemctl start ipsec #sudo service ipsec start
+systemctl status ipsec
+
+#Create secgroup for ssh and launch instance - master
+sshmsgid=$(aws ec2 create-security-group --group-name SSHAccess --description "Security group for SSH access" --vpc-id $workervpc1 | jq '.GroupId' | tr -d '"')
+aws ec2 authorize-security-group-ingress --group-id $sshmsgid --protocol tcp --port 22 --cidr $opsubcidr
+aws ec2 run-instances --image-id ami-0b1e2eeb33ce3d66f --count 1 --instance-type t2.micro --key-name demokp --security-group-ids $sshmsgid --subnet-id $opsub
+
+
+

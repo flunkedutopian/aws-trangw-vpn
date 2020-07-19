@@ -1,0 +1,50 @@
+trialvpcid=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 | jq '.Vpc.VpcId' | tr -d '"')
+aws ec2 modify-vpc-attribute --enable-dns-support --vpc-id $trialvpcid
+aws ec2 modify-vpc-attribute --enable-dns-hostnames --vpc-id $trialvpcid
+
+aws ec2 describe-availability-zones --output table
+
+tpubsub=$(aws ec2 create-subnet --vpc-id $trialvpcid --cidr-block 10.0.0.0/24 --availability-zone us-west-2a | jq '.Subnet.SubnetId' | tr -d '"')
+tprivsub=$(aws ec2 create-subnet --vpc-id $trialvpcid --cidr-block 10.0.1.0/24 --availability-zone us-west-2b | jq '.Subnet.SubnetId' | tr -d '"')
+
+tigwid=$(aws ec2 create-internet-gateway  |  jq '.InternetGateway.InternetGatewayId' | tr -d '"')
+aws ec2 attach-internet-gateway --vpc-id $trialvpcid --internet-gateway-id $tigwid
+
+pubrtbid=$(aws ec2 create-route-table --vpc-id $trialvpcid | jq '.RouteTable.RouteTableId' | tr -d '"')
+aws ec2 create-route --route-table-id $pubrtbid --destination-cidr-block 0.0.0.0/0 --gateway-id $tigwid
+
+aws ec2 associate-route-table  --subnet-id $tpubsub --route-table-id $pubrtbid
+aws ec2 modify-subnet-attribute --subnet-id $tpubsub --map-public-ip-on-launch
+
+aws ec2 create-key-pair --key-name MyKeyPair --query 'KeyMaterial' --output text > MyKeyPair.pem
+chmod 400 MyKeyPair.pem
+
+sshsgid=$(aws ec2 create-security-group --group-name SSHAccess --description "Security group for SSH access" --vpc-id $trialvpcid | jq '.GroupId' | tr -d '"')
+aws ec2 authorize-security-group-ingress --group-id $sshsgid --protocol tcp --port 22 --cidr 0.0.0.0/0
+aws ec2 run-instances --image-id ami-0b1e2eeb33ce3d66f --count 1 --instance-type t2.micro --key-name demokp --security-group-ids $sshsgid --subnet-id $tpubsub
+ssh -i "MyKeyPair.pem" ec2-user@35.163.224.210
+ssh-add [path to key if there is one]/[key_name].pem
+ssh -A ec2-user@PubIP
+
+pubsubaccsgid=$(aws ec2 create-security-group --group-name AllowPubSubAccess --description "Security group for access from PublicSubnet" --vpc-id $trialvpcid | jq '.GroupId' | tr -d '"')
+aws ec2 authorize-security-group-ingress --group-id $pubsubaccsgid --protocol tcp --port 22 --source-group $sshsgid
+aws ec2 run-instances --image-id ami-0b1e2eeb33ce3d66f --count 1 --instance-type t2.micro --key-name demokp --security-group-ids $pubsubaccsgid --subnet-id $tprivsub
+ssh ec2-user@privIP
+
+#all of these will exist, only last step needs to be redone
+aws iam create-role --role-name plservprof --assume-role-policy-document file://ec2-asmplcy.json
+aws iam attach-role-policy --role-name plservprof --policy-arn arn:aws:iam::aws:policy/job-function/SystemAdministrator
+aws iam create-instance-profile --instance-profile-name plsiprof
+aws iam add-role-to-instance-profile --instance-profile-name plsiprof --role-name plservprof
+aws ec2 associate-iam-instance-profile --iam-instance-profile Name=plsiprof --instance-id i-09ddada1d31805a57
+
+privsubaccsgid=$(aws ec2 create-security-group --group-name AllowPrivSubAccess --description "Security group for access from PrivSubnet" --vpc-id $trialvpcid | jq '.GroupId' | tr -d '"')
+aws ec2 authorize-security-group-ingress --group-id $privsubaccsgid --protocol tcp --port 443 --source-group $pubsubaccsgid
+aws ec2 create-vpc-endpoint --vpc-id $trialvpcid --vpc-endpoint-type Interface --service-name com.amazonaws.us-west-2.ec2 --subnet-id $tprivsub --security-group-id $privsubaccsgid
+
+#within the private instance run: aws ec2 describe-instances --region us-west-2
+
+
+
+
+
