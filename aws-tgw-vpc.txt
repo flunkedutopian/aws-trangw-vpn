@@ -1,0 +1,117 @@
+#CIDR Variables
+mvpccidr="10.0.0.0/16"
+w1vpccidr="10.1.0.0/16"
+w2vpccidr="10.2.0.0/16"
+w3vpccidr="10.3.0.0/16"
+
+msubcidr="10.0.0.0/24"
+w1subcidr="10.1.0.0/24"
+w2subcidr="10.2.0.0/24"
+w3subcidr="10.3.0.0/24"
+
+#Create VPC, Subnet, Routetable, associate Route table with subnet - masterVpc
+mastervpc=$(aws ec2 create-vpc --cidr-block $mvpccidr | jq '.Vpc.VpcId' | tr -d '"')
+aws ec2 create-tags --resources $mastervpc --tags Key=Name,Value=mastervpc
+msub=$(aws ec2 create-subnet --vpc-id $mastervpc --cidr-block $msubcidr --availability-zone us-west-2a | jq '.Subnet.SubnetId' | tr -d '"')
+aws ec2 create-tags --resources $msub --tags Key=Name,Value=msub
+msubrtb=$(aws ec2 create-route-table --vpc-id $mastervpc | jq '.RouteTable.RouteTableId' | tr -d '"')
+aws ec2 create-tags --resources $msubrtb --tags Key=Name,Value=msubrtb
+aws ec2 associate-route-table --route-table-id $msubrtb --subnet-id $msub
+
+#Create VPC, Subnet, Routetable, associate Route table with subnet - WorkerVpc1
+workervpc1=$(aws ec2 create-vpc --cidr-block $w1vpccidr | jq '.Vpc.VpcId' | tr -d '"')
+aws ec2 create-tags --resources $workervpc1 --tags Key=Name,Value=workervpc1
+w1sub=$(aws ec2 create-subnet --vpc-id $workervpc1 --cidr-block $w1subcidr --availability-zone us-west-2a | jq '.Subnet.SubnetId' | tr -d '"')
+aws ec2 create-tags --resources $w1sub --tags Key=Name,Value=w1sub
+w1subrtb=$(aws ec2 create-route-table --vpc-id $workervpc1 | jq '.RouteTable.RouteTableId' | tr -d '"')
+aws ec2 create-tags --resources $w1subrtb --tags Key=Name,Value=w1subrtb
+aws ec2 associate-route-table --route-table-id $w1subrtb --subnet-id $w1sub
+
+#Create VPC, Subnet, Routetable, associate Route table with subnet - WorkerVpc2
+workervpc2=$(aws ec2 create-vpc --cidr-block $w2vpccidr | jq '.Vpc.VpcId' | tr -d '"')
+aws ec2 create-tags --resources $workervpc2 --tags Key=Name,Value=workervpc2
+w2sub=$(aws ec2 create-subnet --vpc-id $workervpc2 --cidr-block $w2subcidr --availability-zone us-west-2a | jq '.Subnet.SubnetId' | tr -d '"')
+aws ec2 create-tags --resources $w2sub --tags Key=Name,Value=w2sub
+w2subrtb=$(aws ec2 create-route-table --vpc-id $workervpc2 | jq '.RouteTable.RouteTableId' | tr -d '"')
+aws ec2 create-tags --resources $w2subrtb --tags Key=Name,Value=w2subrtb
+aws ec2 associate-route-table --route-table-id $w2subrtb --subnet-id $w2sub
+
+#Create VPC, Subnet, Routetable, associate Route table with subnet - WorkerVpc3
+workervpc3=$(aws ec2 create-vpc --cidr-block $w3vpccidr | jq '.Vpc.VpcId' | tr -d '"')
+aws ec2 create-tags --resources $workervpc3 --tags Key=Name,Value=workervpc3
+w3sub=$(aws ec2 create-subnet --vpc-id $workervpc3 --cidr-block $w3subcidr --availability-zone us-west-2a | jq '.Subnet.SubnetId' | tr -d '"')
+aws ec2 create-tags --resources $w3sub --tags Key=Name,Value=w3sub
+w3subrtb=$(aws ec2 create-route-table --vpc-id $workervpc3 | jq '.RouteTable.RouteTableId' | tr -d '"')
+aws ec2 create-tags --resources $w3subrtb --tags Key=Name,Value=w3subrtb
+aws ec2 associate-route-table --route-table-id $w3subrtb --subnet-id $w3sub
+
+#Create Transit Gateway
+hubtgw=$(aws ec2 create-transit-gateway --description hubtgw \
+    --options=AmazonSideAsn=64516,AutoAcceptSharedAttachments=enable,DefaultRouteTableAssociation=enable,DefaultRouteTablePropagation=enable,VpnEcmpSupport=enable,DnsSupport=enable \
+	| jq '.TransitGateway.TransitGatewayId' | tr -d '"')
+    
+#Insert route to w1sub, w2sub, w3sub through Transit Gatewy into msubrtb
+aws ec2 create-route --route-table-id $msubrtb --destination-cidr-block $w1subcidr --gateway-id $hubtgw
+aws ec2 create-route --route-table-id $msubrtb --destination-cidr-block $w2subcidr --gateway-id $hubtgw
+aws ec2 create-route --route-table-id $msubrtb --destination-cidr-block $w3subcidr --gateway-id $hubtgw
+
+#Insert route to msub through Transit Gatewy into w1subrtb
+aws ec2 create-route --route-table-id $w1subrtb --destination-cidr-block $msubcidr --gateway-id $hubtgw
+
+#Insert route to msub through Transit Gatewy into w2subrtb
+aws ec2 create-route --route-table-id $w2subrtb --destination-cidr-block $msubcidr --gateway-id $hubtgw
+
+#Insert route to msub through Transit Gatewy into w3subrtb
+aws ec2 create-route --route-table-id $w3subrtb --destination-cidr-block $msubcidr --gateway-id $hubtgw
+    
+#attach transit gateway to all vpcs and respective subnets (msub, w1sub, w2sub & w3sub)
+aws ec2 create-transit-gateway-vpc-attachment --transit-gateway-id $hubtgw --vpc-id $mastervpc --subnet-id $msub
+aws ec2 create-transit-gateway-vpc-attachment --transit-gateway-id $hubtgw --vpc-id $workervpc1 --subnet-id $w1sub
+aws ec2 create-transit-gateway-vpc-attachment --transit-gateway-id $hubtgw --vpc-id $workervpc2 --subnet-id $w2sub
+aws ec2 create-transit-gateway-vpc-attachment --transit-gateway-id $hubtgw --vpc-id $workervpc3 --subnet-id $w3sub
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
+#reconsider below command as it presents all tgw route tables, for now we have only one
+hubtgwrtb=$(aws ec2 describe-transit-gateway-route-tables | jq '.TransitGatewayRouteTables[0].TransitGatewayRouteTableId' | tr -d '"') 
+
+aws ec2 get-transit-gateway-route-table-propagations --transit-gateway-route-table-id $hubtgwrtb --output table
+
+#refine this to show tag value and subnetid in table
+aws ec2 describe-subnets --filters "Name=tag:Name,Values=msub,w1sub,w2sub,w3sub" --query 'Subnets[*].SubnetId'
+msub=$(aws ec2 describe-subnets --filters "Name=tag:Name,Values=msub" | jq '.Subnets[0].SubnetId' | tr -d '"')
+w1sub=$(aws ec2 describe-subnets --filters "Name=tag:Name,Values=w1sub" | jq '.Subnets[0].SubnetId' | tr -d '"')
+w2sub=$(aws ec2 describe-subnets --filters "Name=tag:Name,Values=w2sub" | jq '.Subnets[0].SubnetId' | tr -d '"')
+w3sub=$(aws ec2 describe-subnets --filters "Name=tag:Name,Values=w3sub" | jq '.Subnets[0].SubnetId' | tr -d '"')
+
+tigwid=$(aws ec2 create-internet-gateway  |  jq '.InternetGateway.InternetGatewayId' | tr -d '"')
+aws ec2 attach-internet-gateway --vpc-id $mastervpc --internet-gateway-id $tigwid
+aws ec2 create-route --route-table-id $msubrtb --destination-cidr-block 0.0.0.0/0 --gateway-id $tigwid
+
+sshmsgid=$(aws ec2 create-security-group --group-name SSHAccess --description "Security group for SSH access" --vpc-id $mastervpc | jq '.GroupId' | tr -d '"')
+aws ec2 authorize-security-group-ingress --group-id $sshmsgid --protocol tcp --port 22 --cidr 0.0.0.0/0
+aws ec2 run-instances --image-id ami-0b1e2eeb33ce3d66f --count 1 --instance-type t2.micro --key-name demokp --security-group-ids $sshmsgid --subnet-id $msub --associate-public-ip-address
+
+sshw1sgid=$(aws ec2 create-security-group --group-name SSHAccess --description "Security group for SSH access" --vpc-id $workervpc1 | jq '.GroupId' | tr -d '"')
+aws ec2 authorize-security-group-ingress --group-id $sshw1sgid --protocol tcp --port 22 --cidr $msubcidr
+aws ec2 run-instances --image-id ami-0b1e2eeb33ce3d66f --count 1 --instance-type t2.micro --key-name demokp --security-group-ids $sshw1sgid --subnet-id $w1sub
+
+
+minstance="i-08cd0bfbb62643359"
+
+aws ec2 describe-route-tables --route-table-id $msubrtb --output table
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
+#clean up
+aws ec2 describe-transit-gateway-vpc-attachments --output table
+
+aws ec2 delete-transit-gateway-vpc-attachment --transit-gateway-attachment-id tgw-attach-0266922b9159588cd
+aws ec2 delete-transit-gateway-vpc-attachment --transit-gateway-attachment-id tgw-attach-09eb296bed823ed45
+aws ec2 delete-transit-gateway-vpc-attachment --transit-gateway-attachment-id tgw-attach-09fab1815b7ad25a9
+aws ec2 delete-transit-gateway-vpc-attachment --transit-gateway-attachment-id tgw-attach-0a16289f6833077aa
+
+aws ec2 delete-transit-gateway --transit-gateway-id hubtgw
+
+aws ec2 delete-vpc --vpc-id vpc-07c6477f879953208 #$mastervpc
+aws ec2 delete-vpc --vpc-id vpc-0f0cb7366db103a52 #$workervpc1
+aws ec2 delete-vpc --vpc-id vpc-0b1a299b9f952c5e9 #$workervpc2
+aws ec2 delete-vpc --vpc-id vpc-024397e98412b970d #$workervpc3
+
+aws ec2 delete-internet-gateway --internet-gateway-id igw-0531eb7c
